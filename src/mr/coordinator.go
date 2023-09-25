@@ -1,15 +1,22 @@
 package mr
 
 import (
-	"errors"
 	"log"
-	"sync"
 	"time"
 )
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+
+const (
+	MAP_PHASE = iota + 1
+	REDUCE_PHASE
+	PENDING_RUNNING
+	TASK_DONE
+)
+
+type CStatus int
 
 type Task struct {
 	filename    string
@@ -18,114 +25,133 @@ type Task struct {
 	seqNum      int
 }
 
-type TaskQueueNode struct {
-	task *Task
-	prev *TaskQueueNode
-	next *TaskQueueNode
-}
-type TaskQueue struct {
-	head  *TaskQueueNode
-	tail  *TaskQueueNode
-	mutex sync.Mutex
-	size  uint32
-}
-
-func NewNode(tsk *Task) *TaskQueueNode {
-	ret := TaskQueueNode{task: tsk}
-	return &ret
-}
-
-func (t *TaskQueue) Push(task *Task) error {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-	if t.head == nil && t.tail == nil {
-		// initialize when insert the first node
-		t.head = NewNode(nil)
-		t.tail = t.head
-	}
-
-	newNode := NewNode(task)
-	t.head.next.prev = newNode
-	newNode.next = t.head.next
-	t.head.next = newNode
-	newNode.prev = t.head
-	t.size++
-
-	//t.mutex.Unlock()
-	return nil
-}
-
-func (t *TaskQueue) Pop() (*Task, error) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	if t.size == 0 {
-		t.mutex.Unlock()
-		return nil, errors.New("task queue is empty")
-	}
-
-	lastNode := t.tail.prev
-	lastNode.prev.next = t.tail
-	t.tail.prev = lastNode.prev
-	t.size--
-
-	lastNode.prev = nil
-	lastNode.next = nil
-
-	return lastNode.task, nil
-}
-
-func (t *TaskQueue) Size() uint32 {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	return t.size
-}
+//type TaskQueueNode struct {
+//	task *Task
+//	prev *TaskQueueNode
+//	next *TaskQueueNode
+//}
+//type TaskQueue struct {
+//	head  *TaskQueueNode
+//	tail  *TaskQueueNode
+//	mutex sync.Mutex
+//	size  uint32
+//}
+//
+//func NewNode(tsk *Task) *TaskQueueNode {
+//	ret := TaskQueueNode{task: tsk}
+//	return &ret
+//}
+//
+//func (t *TaskQueue) Push(task *Task) error {
+//	t.mutex.Lock()
+//	defer t.mutex.Unlock()
+//	if t.head == nil && t.tail == nil {
+//		// initialize when insert the first node
+//		t.head = NewNode(nil)
+//		t.tail = t.head
+//	}
+//
+//	newNode := NewNode(task)
+//	t.head.next.prev = newNode
+//	newNode.next = t.head.next
+//	t.head.next = newNode
+//	newNode.prev = t.head
+//	t.size++
+//
+//	//t.mutex.Unlock()
+//	return nil
+//}
+//
+//func (t *TaskQueue) Pop() (*Task, error) {
+//	t.mutex.Lock()
+//	defer t.mutex.Unlock()
+//
+//	if t.size == 0 {
+//		t.mutex.Unlock()
+//		return nil, errors.New("task queue is empty")
+//	}
+//
+//	lastNode := t.tail.prev
+//	lastNode.prev.next = t.tail
+//	t.tail.prev = lastNode.prev
+//	t.size--
+//
+//	lastNode.prev = nil
+//	lastNode.next = nil
+//
+//	return lastNode.task, nil
+//}
+//
+//func (t *TaskQueue) Size() uint32 {
+//	t.mutex.Lock()
+//	defer t.mutex.Unlock()
+//
+//	return t.size
+//}
 
 type Coordinator struct {
 	// Your definitions here.
-	buckets     int
+	nReduce     int
 	MapQueue    chan *Task
 	ReduceQueue chan *Task
 	runningSet  map[string]bool
 
 	mapDoneNum    int
-	ReduceDoneNum int
+	reduceDoneNum int
+	runningNum    int
+}
+
+func (c *Coordinator) checkForStatus() CStatus {
+	if c.mapDoneNum == c.nReduce && c.reduceDoneNum == c.nReduce {
+		return FINISHED
+	}
+	if c.mapDoneNum == c.nReduce {
+		if c.reduceDoneNum+c.runningNum == c.nReduce {
+			return PENDING_RUNNING
+		} else if c.reduceDoneNum == c.nReduce {
+			return TASK_DONE
+		}
+		return REDUCE_PHASE
+	}
+
+	if c.mapDoneNum+c.runningNum == c.nReduce {
+		return PENDING_RUNNING
+	}
+
+	return MAP_PHASE
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
-	var err error
 	var task *Task
 
+	curStatus := c.checkForStatus()
+
+	switch curStatus {
+	case PENDING_RUNNING:
+		reply.status = PENDING
+		return nil
+
+	case TASK_DONE:
+		reply.status = FINISHED
+		return nil
+
+	case MAP_PHASE:
+	case REDUCE_PHASE:
+		break
+	}
+
 	/* check for reduce queue */
-	task, err = c.ReduceQueue
-	if err == nil {
-		if c.runningSet[task.filename] {
-			log.Panic("task was running")
-		}
-		c.runningSet[task.filename] = true
-		task.beginTime = time.Time{}
-		reply.task = task
-		return nil
-	}
-
 	/* check for map queue */
-	task, err = c.MapQueue.Pop()
-	if err == nil {
-		if c.runningSet[task.filename] {
-			log.Panic("task was running")
-		}
-		c.runningSet[task.filename] = true
-		task.beginTime = time.Time{}
-		reply.task = task
-		return nil
+	task = <-c.ReduceQueue
+	if c.runningSet[task.filename] {
+		log.Panic("task was running")
 	}
-
-	/* check for runningQueue */
-	if len(c.runningSet) == 0 {
-		args.endSign = true
-	}
+	c.runningSet[task.filename] = true
+	task.beginTime = time.Time{}
+	reply.task = task
+	reply.status = RUNNING
+	reply.task.mapOrReduce = curStatus == MAP_PHASE
 
 	return nil
 }
@@ -173,7 +199,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.MapQueue = make(chan *Task, nReduce)
 	c.ReduceQueue = make(chan *Task, nReduce)
-	c.buckets = nReduce
+	c.nReduce = nReduce
 	for i, file := range files {
 		t := Task{}
 		t.filename = file

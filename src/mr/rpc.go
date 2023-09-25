@@ -29,7 +29,6 @@ type ExampleReply struct {
 	task       *Task
 	status     int
 	expireTime uint8
-	seqNum     int
 }
 
 // Add your RPC definitions here.

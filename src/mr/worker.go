@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"sort"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -51,6 +52,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				log.Printf("work exit")
 				os.Exit(0)
 			case PENDING:
+				time.Sleep(1 * time.Second)
 				break
 			case FAILED:
 				log.Printf("job failed")
@@ -74,7 +76,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			outFilePathList := []*os.File{}
 			jsonFileList := []*json.Encoder{}
 			for i := 0; i < args.nReduce; i++ {
-				outfilename := fmt.Sprintf("./mr-%v-%v.json", reply.seqNum, i)
+				outfilename := fmt.Sprintf("./mr-%v-%v.json", reply.task.seqNum, i)
 				file, err := os.Open(outfilename)
 				if err != nil {
 					log.Fatalf("cannot open json file: %v", outfilename)
@@ -103,7 +105,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			var intermediate []KeyValue
 			// decode kvs from mr-*-Y.json
 			for i := 0; i < args.nReduce; i++ {
-				interFilePath := fmt.Sprintf("./mr-%v-%v.json", i, reply.seqNum)
+				interFilePath := fmt.Sprintf("./mr-%v-%v.json", i, reply.task.seqNum)
 				file, err := os.Open(interFilePath)
 				defer func(file *os.File) {
 					err := file.Close()
@@ -128,7 +130,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			// sort and gather
 			sort.Sort(SortByKey(intermediate))
 
-			outname := fmt.Sprintf("mr-out-%v", reply.seqNum)
+			outname := fmt.Sprintf("mr-out-%v", reply.task.seqNum)
 			outfile, _ := os.Create(outname)
 			defer func(f *os.File) {
 				err := f.Close()
@@ -155,6 +157,9 @@ func Worker(mapf func(string, string) []KeyValue,
 				i = j
 			}
 		}
+
+		// TODO: RPC for done
+
 	}
 }
 
