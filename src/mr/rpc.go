@@ -9,18 +9,27 @@ package mr
 import "os"
 import "strconv"
 
+const (
+	PENDING = iota + 1
+	RUNNING
+	FAILED
+	FINISHED
+)
+
 //
 // example to show how to declare the arguments
 // and reply for an RPC.
 //
 
 type ExampleArgs struct {
-	X int
+	nReduce int
 }
 
 type ExampleReply struct {
 	task       *Task
+	status     int
 	expireTime uint8
+	seqNum     int
 }
 
 // Add your RPC definitions here.
