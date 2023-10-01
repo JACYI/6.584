@@ -27,7 +27,7 @@ type KeyValue struct {
 }
 
 // use ihash(key) % NReduce to choose the reduce
-// task number for each KeyValue emitted by Map.
+// Task number for each KeyValue emitted by Map.
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -45,120 +45,41 @@ func Worker(mapf func(string, string) []KeyValue,
 		for {
 			CallForTask(&args, &reply)
 
-			switch reply.status {
+			switch reply.Status {
 			case RUNNING:
 				goto runTask
 			case FINISHED:
-				log.Printf("work exit")
+				log.Println("work exit")
 				os.Exit(0)
 			case PENDING:
 				time.Sleep(1 * time.Second)
 				break
 			case FAILED:
-				log.Printf("job failed")
+				log.Println("job failed")
 			}
 		}
 
 	runTask:
-		if reply.task.mapOrReduce {
-			/* Map task */
-			file, err := os.Open(reply.task.filename)
+		if reply.Task.MapOrReduce {
+			/* Map Task */
+			err := doMap(mapf, &reply)
 			if err != nil {
-				log.Fatalf("cannot open %v", reply.task.filename)
-			}
-			content, err := ioutil.ReadAll(file)
-			if err != nil {
-				log.Fatalf("cannot read %v", reply.task.filename)
-			}
-
-			kvs := mapf(reply.task.filename, string(content))
-
-			outFilePathList := []*os.File{}
-			jsonFileList := []*json.Encoder{}
-			for i := 0; i < args.nReduce; i++ {
-				outfilename := fmt.Sprintf("./mr-%v-%v.json", reply.task.seqNum, i)
-				file, err := os.Open(outfilename)
-				if err != nil {
-					log.Fatalf("cannot open json file: %v", outfilename)
-				}
-				outFilePathList = append(outFilePathList, file)
-				enc := json.NewEncoder(file)
-				jsonFileList = append(jsonFileList, enc)
-			}
-			defer func(files []*os.File) {
-				for _, file := range files {
-					file.Close()
-				}
-			}(outFilePathList)
-
-			// write
-			for _, kv := range kvs {
-				bucketId := ihash(kv.Key) % args.nReduce
-				err := jsonFileList[bucketId].Encode(&kv)
-				if err != nil {
-					log.Fatalf("cannot write kv:[%v:%v] to json file", kv.Key, kv.Value)
-				}
+				log.Printf("map error: %v\n", err)
+				continue
+				//os.Exit(1)
 			}
 
 		} else {
-			/* Reduce task */
-			var intermediate []KeyValue
-			// decode kvs from mr-*-Y.json
-			for i := 0; i < args.nReduce; i++ {
-				interFilePath := fmt.Sprintf("./mr-%v-%v.json", i, reply.task.seqNum)
-				file, err := os.Open(interFilePath)
-				defer func(file *os.File) {
-					err := file.Close()
-					if err != nil {
-
-					}
-				}(file)
-				if err != nil {
-					log.Fatalf("cannot open file %v when reduce", interFilePath)
-				}
-
-				decoder := json.NewDecoder(file)
-				for {
-					var kv KeyValue
-					if err := decoder.Decode(&kv); err != nil {
-						break
-					}
-					intermediate = append(intermediate, kv)
-				}
-			}
-
-			// sort and gather
-			sort.Sort(SortByKey(intermediate))
-
-			outname := fmt.Sprintf("mr-out-%v", reply.task.seqNum)
-			outfile, _ := os.Create(outname)
-			defer func(f *os.File) {
-				err := f.Close()
-				if err != nil {
-
-				}
-			}(outfile)
-
-			// reduce
-			i := 0
-			for i < len(intermediate) {
-				j := i + 1
-				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-					j++
-				}
-				values := []string{}
-				for k := i; k < j; k++ {
-					values = append(values, intermediate[k].Value)
-				}
-				output := reducef(intermediate[i].Key, values)
-
-				fmt.Fprintf(outfile, "%v%v%v\n", intermediate[i].Key, DELIMITER, output)
-
-				i = j
+			/* Reduce Task */
+			err := doReduce(reducef, &reply)
+			if err != nil {
+				log.Printf("reduce error: %v\n", err)
+				continue
+				//os.Exit(1)
 			}
 		}
-
-		// TODO: RPC for done
+		// call RPC for done
+		completeTask(reply.Task.SeqNum, reply.Task.MapOrReduce)
 
 	}
 }
@@ -203,6 +124,18 @@ func CallForTask(args *ExampleArgs, reply *ExampleReply) {
 
 }
 
+func completeTask(seqNum int, mapOrReduce bool) {
+	args := ExampleArgs{}
+	args.SeqNum = seqNum
+	args.MapOrReduce = mapOrReduce
+	reply := ExampleReply{}
+
+	ok := call("Coordinator.CompleteTask", &args, &reply)
+	if !ok {
+		log.Fatalf("rpc failed: %v\n", ok)
+	}
+}
+
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
@@ -222,4 +155,115 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func doMap(mapf func(string, string) []KeyValue, reply *ExampleReply) error {
+	file, err := os.Open(reply.Task.Filename)
+	if err != nil {
+		log.Fatalf("cannot open %v\n", reply.Task.Filename)
+		return err
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v\n", reply.Task.Filename)
+		return err
+	}
+
+	kvs := mapf(reply.Task.Filename, string(content))
+
+	outFilePathList := []*os.File{}
+	jsonFileList := []*json.Encoder{}
+	for i := 0; i < reply.NReduce; i++ {
+		outfilename := fmt.Sprintf("mr-%v-%v.json", reply.Task.SeqNum, i)
+		jsonfile, ok := os.OpenFile(outfilename, os.O_CREATE|os.O_WRONLY, 0755)
+		if ok != nil {
+			log.Fatalf("cannot open json file: %v\n", outfilename)
+			return ok
+		}
+		outFilePathList = append(outFilePathList, jsonfile)
+		enc := json.NewEncoder(jsonfile)
+		jsonFileList = append(jsonFileList, enc)
+	}
+	defer func(files []*os.File) {
+		for _, file := range files {
+			err := file.Close()
+			if err != nil {
+				log.Printf("can not close file: %v\n", file.Name())
+			}
+		}
+	}(outFilePathList)
+
+	// write
+	for _, kv := range kvs {
+		bucketId := ihash(kv.Key) % reply.NReduce
+		ok := jsonFileList[bucketId].Encode(&kv)
+		if ok != nil {
+			log.Fatalf("cannot write kv:[%v:%v] to json file\n", kv.Key, kv.Value)
+			return ok
+		}
+	}
+	return nil
+}
+
+func doReduce(reducef func(string, []string) string, reply *ExampleReply) error {
+	var intermediate []KeyValue
+	// decode kvs from mr-*-Y.json
+	for i := 0; i < reply.NMap; i++ {
+		interFilePath := fmt.Sprintf("./mr-%v-%v.json", i, reply.Task.SeqNum)
+		file, err := os.Open(interFilePath)
+		defer func(file *os.File) {
+			err = file.Close()
+			if err != nil {
+				log.Printf("failed to close file %v[%v]\n", file.Name(), err)
+			}
+			err = os.Remove(file.Name())
+			if err != nil {
+				log.Printf("failed to delete file %v[%v]\n", file.Name(), err)
+			}
+		}(file)
+		if err != nil {
+			log.Fatalf("cannot open file %v when reduce, %v\n", interFilePath, err)
+		}
+
+		decoder := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := decoder.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+	}
+
+	// sort and gather
+	sort.Sort(SortByKey(intermediate))
+
+	outname := fmt.Sprintf("mr-out-%v", reply.Task.SeqNum)
+	outfile, _ := os.Create(outname)
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			log.Printf("failed to close file %v, %v\n", f.Name(), err)
+		}
+	}(outfile)
+
+	// reduce
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		fmt.Fprintf(outfile, "%v%v%v\n", intermediate[i].Key, DELIMITER, output)
+
+		i = j
+	}
+
+	return nil
 }

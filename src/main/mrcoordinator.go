@@ -9,7 +9,10 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
+import (
+	"6.5840/mr"
+	"path/filepath"
+)
 import "time"
 import "os"
 import "fmt"
@@ -19,8 +22,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
 		os.Exit(1)
 	}
+	files := []string{}
+	for _, s := range os.Args[1:] {
+		fs, err := filepath.Glob(s)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: unformatted input pattern: %s\n", s)
+			os.Exit(1)
+		}
+		files = append(files, fs...)
+	}
 
-	m := mr.MakeCoordinator(os.Args[1:], 10)
+	m := mr.MakeCoordinator(files, 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}

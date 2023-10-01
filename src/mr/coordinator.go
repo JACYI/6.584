@@ -2,6 +2,7 @@ package mr
 
 import (
 	"log"
+	"sync"
 	"time"
 )
 import "net"
@@ -19,94 +20,33 @@ const (
 type CStatus int
 
 type Task struct {
-	filename    string
-	beginTime   time.Time
-	mapOrReduce bool // true is map, false is reduce
-	seqNum      int
+	Filename    string
+	BeginTime   time.Time
+	MapOrReduce bool // true is map, false is reduce
+	SeqNum      int
 }
-
-//type TaskQueueNode struct {
-//	task *Task
-//	prev *TaskQueueNode
-//	next *TaskQueueNode
-//}
-//type TaskQueue struct {
-//	head  *TaskQueueNode
-//	tail  *TaskQueueNode
-//	mutex sync.Mutex
-//	size  uint32
-//}
-//
-//func NewNode(tsk *Task) *TaskQueueNode {
-//	ret := TaskQueueNode{task: tsk}
-//	return &ret
-//}
-//
-//func (t *TaskQueue) Push(task *Task) error {
-//	t.mutex.Lock()
-//	defer t.mutex.Unlock()
-//	if t.head == nil && t.tail == nil {
-//		// initialize when insert the first node
-//		t.head = NewNode(nil)
-//		t.tail = t.head
-//	}
-//
-//	newNode := NewNode(task)
-//	t.head.next.prev = newNode
-//	newNode.next = t.head.next
-//	t.head.next = newNode
-//	newNode.prev = t.head
-//	t.size++
-//
-//	//t.mutex.Unlock()
-//	return nil
-//}
-//
-//func (t *TaskQueue) Pop() (*Task, error) {
-//	t.mutex.Lock()
-//	defer t.mutex.Unlock()
-//
-//	if t.size == 0 {
-//		t.mutex.Unlock()
-//		return nil, errors.New("task queue is empty")
-//	}
-//
-//	lastNode := t.tail.prev
-//	lastNode.prev.next = t.tail
-//	t.tail.prev = lastNode.prev
-//	t.size--
-//
-//	lastNode.prev = nil
-//	lastNode.next = nil
-//
-//	return lastNode.task, nil
-//}
-//
-//func (t *TaskQueue) Size() uint32 {
-//	t.mutex.Lock()
-//	defer t.mutex.Unlock()
-//
-//	return t.size
-//}
 
 type Coordinator struct {
 	// Your definitions here.
 	nReduce     int
+	nMap        int
+	lock        sync.Mutex
 	MapQueue    chan *Task
 	ReduceQueue chan *Task
-	runningSet  map[string]bool
+	runningSet  map[int]bool
 
 	mapDoneNum    int
 	reduceDoneNum int
-	runningNum    int
+	//runningNum    int
+	phase string
 }
 
-func (c *Coordinator) checkForStatus() CStatus {
-	if c.mapDoneNum == c.nReduce && c.reduceDoneNum == c.nReduce {
+func checkForStatus(c *Coordinator) CStatus {
+	if c.mapDoneNum == c.nMap && c.reduceDoneNum == c.nReduce {
 		return FINISHED
 	}
-	if c.mapDoneNum == c.nReduce {
-		if c.reduceDoneNum+c.runningNum == c.nReduce {
+	if c.mapDoneNum == c.nMap {
+		if c.reduceDoneNum+len(c.runningSet) == c.nReduce {
 			return PENDING_RUNNING
 		} else if c.reduceDoneNum == c.nReduce {
 			return TASK_DONE
@@ -114,7 +54,7 @@ func (c *Coordinator) checkForStatus() CStatus {
 		return REDUCE_PHASE
 	}
 
-	if c.mapDoneNum+c.runningNum == c.nReduce {
+	if c.mapDoneNum+len(c.runningSet) == c.nMap {
 		return PENDING_RUNNING
 	}
 
@@ -124,42 +64,63 @@ func (c *Coordinator) checkForStatus() CStatus {
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
 	var task *Task
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
-	curStatus := c.checkForStatus()
+	reply.NReduce = c.nReduce
+	curStatus := checkForStatus(c)
+	log.Printf("status: %v\n", curStatus)
 
 	switch curStatus {
 	case PENDING_RUNNING:
-		reply.status = PENDING
+		reply.Status = PENDING
+		log.Printf("pending\n")
 		return nil
 
 	case TASK_DONE:
-		reply.status = FINISHED
+		reply.Status = FINISHED
+		log.Printf("all were finished\n")
 		return nil
 
 	case MAP_PHASE:
+		log.Printf("map queue size: %v", len(c.MapQueue))
+		task = <-c.MapQueue
+		break
 	case REDUCE_PHASE:
+		log.Printf("reduce queue size: %v", len(c.ReduceQueue))
+		task = <-c.ReduceQueue
 		break
 	}
 
-	/* check for reduce queue */
-	/* check for map queue */
-	task = <-c.ReduceQueue
-	if c.runningSet[task.filename] {
-		log.Panic("task was running")
+	log.Printf("task file: %v\n", task.Filename)
+	if c.runningSet[task.SeqNum] {
+		log.Panic("Task was running")
 	}
-	c.runningSet[task.filename] = true
-	task.beginTime = time.Time{}
-	reply.task = task
-	reply.status = RUNNING
-	reply.task.mapOrReduce = curStatus == MAP_PHASE
+	c.runningSet[task.SeqNum] = true
+	task.BeginTime = time.Time{}
+	reply.Task = task
+	reply.Status = RUNNING
+	reply.Task.MapOrReduce = curStatus == MAP_PHASE
+	reply.NReduce = c.nReduce
+	reply.NMap = c.nMap
 
 	return nil
 }
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
+func (c *Coordinator) CompleteTask(args *ExampleArgs, reply *ExampleReply) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	if c.runningSet[args.SeqNum] {
+		if args.MapOrReduce {
+			c.mapDoneNum++
+			log.Printf("map task %v done!", args.SeqNum)
+		} else {
+			c.reduceDoneNum++
+			log.Printf("reduce task %v done!", args.SeqNum)
+		}
+		delete(c.runningSet, args.SeqNum)
+	}
 
 	return nil
 }
@@ -181,12 +142,14 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
 	ret := false
 
-	// Your code here.
-	//if c.MapQueue == 0 && c.ReduceQueue.size == 0 && len(c.runningSet) == 0 {
-	//	ret = true
-	//}
+	if c.mapDoneNum == c.nReduce && c.reduceDoneNum == c.nReduce {
+		ret = true
+	}
 
 	return ret
 }
@@ -199,15 +162,27 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.MapQueue = make(chan *Task, nReduce)
 	c.ReduceQueue = make(chan *Task, nReduce)
+	c.runningSet = make(map[int]bool, nReduce)
 	c.nReduce = nReduce
+	c.nMap = len(files)
+	c.phase = "map"
+
 	for i, file := range files {
 		t := Task{}
-		t.filename = file
-		t.mapOrReduce = true
-		t.seqNum = i
+		t.Filename = file
+		t.MapOrReduce = true
+		t.SeqNum = i
 		// push to channel
 		c.MapQueue <- &t
-		log.Printf("Task[%s] push to the map queue\n", t.filename)
+		log.Printf("Map Task[%s] pushed to the map queue\n", t.Filename)
+	}
+
+	for i := 0; i < nReduce; i++ {
+		t := Task{}
+		t.SeqNum = i
+		t.MapOrReduce = false
+		c.ReduceQueue <- &t
+		log.Printf("Reduce Task[%d] pushed to the map queue\n", t.SeqNum)
 	}
 
 	c.server()

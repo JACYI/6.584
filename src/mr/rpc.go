@@ -22,13 +22,15 @@ const (
 //
 
 type ExampleArgs struct {
-	nReduce int
+	SeqNum      int
+	MapOrReduce bool
 }
 
 type ExampleReply struct {
-	task       *Task
-	status     int
-	expireTime uint8
+	Task    *Task
+	Status  int
+	NReduce int
+	NMap    int
 }
 
 // Add your RPC definitions here.
