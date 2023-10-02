@@ -1,9 +1,24 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
+
+const DELIMITER string = " "
+
+type SortByKey []KeyValue
+
+func (b SortByKey) Len() int           { return len(b) }
+func (b SortByKey) Less(i, j int) bool { return b[i].Key <= b[j].Key }
+func (b SortByKey) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -12,7 +27,7 @@ type KeyValue struct {
 }
 
 // use ihash(key) % NReduce to choose the reduce
-// task number for each KeyValue emitted by Map.
+// Task number for each KeyValue emitted by Map.
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -23,62 +38,74 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	for {
+		args := ExampleArgs{}
+		reply := ExampleReply{}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+		for {
+			CallForTask(&args, &reply)
 
-}
+			switch reply.Status {
+			case RUNNING:
+				goto runTask
+			case FINISHED:
+				log.Println("[worker] worker exit")
+				os.Exit(0)
+			case PENDING:
+				log.Println("[worker] pending...")
+				time.Sleep(1 * time.Second)
+				break
+			case FAILED:
+				log.Println("[worker] job failed")
+			}
+		}
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+	runTask:
+		if reply.Task.MapOrReduce {
+			/* Map Task */
+			err := doMap(mapf, &reply)
+			if err != nil {
+				log.Printf("map error: %v\n", err)
+				continue
+				//os.Exit(1)
+			}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+		} else {
+			/* Reduce Task */
+			err := doReduce(reducef, &reply)
+			if err != nil {
+				log.Printf("reduce error: %v\n", err)
+				continue
+				//os.Exit(1)
+			}
+		}
+		// call RPC for done
+		completeTask(&reply)
 
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y \n")
-	} else {
-		fmt.Printf("call failed!\n")
 	}
 }
 
-func CallForTask() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
+func CallForTask(args *ExampleArgs, reply *ExampleReply) {
 	// send the RPC request, wait for the reply.
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
 	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.RequestTask", &args, &reply)
-	if ok {
-		if reply.task.mapOrReduce {
-			Map()
-		}
-	} else {
+	ok := call("Coordinator.RequestTask", args, reply)
+	if !ok {
 		log.Panic("RPC call failed!")
+	}
+
+}
+
+func completeTask(reply *ExampleReply) {
+	args := ExampleArgs{}
+	args.Id = reply.Task.Id
+	args.MapOrReduce = reply.Task.MapOrReduce
+	m := ExampleReply{}
+
+	ok := call("Coordinator.CompleteTask", &args, &m)
+	if !ok {
+		log.Fatalf("rpc failed: %v\n", ok)
 	}
 }
 
@@ -101,4 +128,115 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func doMap(mapf func(string, string) []KeyValue, reply *ExampleReply) error {
+	file, err := os.Open(reply.Task.Filename)
+	if err != nil {
+		log.Fatalf("cannot open %v\n", reply.Task.Filename)
+		return err
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v\n", reply.Task.Filename)
+		return err
+	}
+
+	kvs := mapf(reply.Task.Filename, string(content))
+
+	outFilePathList := []*os.File{}
+	jsonFileList := []*json.Encoder{}
+	for i := 0; i < reply.NReduce; i++ {
+		outfilename := fmt.Sprintf("mr-%v-%v.json", reply.Task.SeqNum, i)
+		jsonfile, ok := os.OpenFile(outfilename, os.O_CREATE|os.O_WRONLY, 0755)
+		if ok != nil {
+			log.Fatalf("cannot open json file: %v\n", outfilename)
+			return ok
+		}
+		outFilePathList = append(outFilePathList, jsonfile)
+		enc := json.NewEncoder(jsonfile)
+		jsonFileList = append(jsonFileList, enc)
+	}
+	defer func(files []*os.File) {
+		for _, file := range files {
+			err := file.Close()
+			if err != nil {
+				log.Printf("can not close file: %v\n", file.Name())
+			}
+		}
+	}(outFilePathList)
+
+	// write
+	for _, kv := range kvs {
+		bucketId := ihash(kv.Key) % reply.NReduce
+		ok := jsonFileList[bucketId].Encode(&kv)
+		if ok != nil {
+			log.Fatalf("cannot write kv:[%v:%v] to json file\n", kv.Key, kv.Value)
+			return ok
+		}
+	}
+	return nil
+}
+
+func doReduce(reducef func(string, []string) string, reply *ExampleReply) error {
+	var intermediate []KeyValue
+	// decode kvs from mr-*-Y.json
+	for i := 0; i < reply.NMap; i++ {
+		interFilePath := fmt.Sprintf("./mr-%v-%v.json", i, reply.Task.SeqNum)
+		file, err := os.Open(interFilePath)
+		defer func(file *os.File) {
+			err = file.Close()
+			if err != nil {
+				log.Printf("failed to close file %v[%v]\n", file.Name(), err)
+			}
+			err = os.Remove(file.Name())
+			if err != nil {
+				log.Printf("failed to delete file %v[%v]\n", file.Name(), err)
+			}
+		}(file)
+		if err != nil {
+			log.Fatalf("cannot open file %v when reduce, %v\n", interFilePath, err)
+		}
+
+		decoder := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := decoder.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+	}
+
+	// sort and gather
+	sort.Sort(SortByKey(intermediate))
+
+	outname := fmt.Sprintf("mr-out-%v", reply.Task.SeqNum)
+	outfile, _ := os.Create(outname)
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			log.Printf("failed to close file %v, %v\n", f.Name(), err)
+		}
+	}(outfile)
+
+	// reduce
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		fmt.Fprintf(outfile, "%v%v%v\n", intermediate[i].Key, DELIMITER, output)
+
+		i = j
+	}
+
+	return nil
 }
