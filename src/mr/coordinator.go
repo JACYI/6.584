@@ -22,6 +22,7 @@ const TimeOut = 10 * time.Second
 type CStatus int
 
 type Task struct {
+	Id          int
 	Filename    string
 	BeginTime   time.Time
 	MapOrReduce bool // true is map, false is reduce
@@ -30,17 +31,16 @@ type Task struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	nReduce     int
-	nMap        int
-	lock        sync.Mutex
+	nReduce int
+	nMap    int
+	lock    sync.Mutex
+
 	MapQueue    chan *Task
 	ReduceQueue chan *Task
 	runningSet  map[int]*Task
 
 	mapDoneNum    int
 	reduceDoneNum int
-	//runningNum    int
-	phase string
 }
 
 func checkForStatus(c *Coordinator) CStatus {
@@ -63,19 +63,17 @@ func checkForStatus(c *Coordinator) CStatus {
 	return MAP_PHASE
 }
 
+/*
+check the running task status and cancel it when timeout
+*/
 func runWatchDog(c *Coordinator, task *Task) {
 	time.Sleep(TimeOut)
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	id := task.SeqNum
-	if !task.MapOrReduce {
-		id += c.nMap
-	}
-
-	if task, ok := c.runningSet[id]; ok && time.Now().Sub(task.BeginTime) > TimeOut {
+	if task, ok := c.runningSet[task.Id]; ok && time.Now().Sub(task.BeginTime) > TimeOut {
 		// cancel the timeout task and reput it into the task queue
-		delete(c.runningSet, id)
+		delete(c.runningSet, task.Id)
 		log.Printf("[task-watch-dog] task %v timeout\n", task.SeqNum)
 		if task.MapOrReduce {
 			log.Printf("[task-watch-dog] task %v reput into map queue\n", task.SeqNum)
@@ -95,7 +93,6 @@ func (c *Coordinator) RequestTask(args *ExampleArgs, reply *ExampleReply) error 
 
 	reply.NReduce = c.nReduce
 	curStatus := checkForStatus(c)
-	log.Printf("status: %v\n", curStatus)
 
 	switch curStatus {
 	case PENDING_RUNNING:
@@ -116,15 +113,12 @@ func (c *Coordinator) RequestTask(args *ExampleArgs, reply *ExampleReply) error 
 		break
 	}
 
-	/* watch dog use id to diff map and reduce phase */
-	id := task.SeqNum
-	if curStatus == REDUCE_PHASE {
-		id += c.nMap
-	}
-	if _, ok := c.runningSet[id]; ok {
+	/* watch dog use task.Id to diff map and reduce phase */
+
+	if _, ok := c.runningSet[task.Id]; ok {
 		log.Panic("[coordinator] Task was running")
 	}
-	c.runningSet[id] = task
+	c.runningSet[task.Id] = task
 	task.BeginTime = time.Now()
 	reply.Task = task
 	reply.Status = RUNNING
@@ -141,20 +135,15 @@ func (c *Coordinator) CompleteTask(args *ExampleArgs, reply *ExampleReply) error
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	id := args.SeqNum
-	if !args.MapOrReduce {
-		id += c.nMap
-	}
-
-	if _, ok := c.runningSet[id]; ok {
+	if _, ok := c.runningSet[args.Id]; ok {
 		if args.MapOrReduce {
 			c.mapDoneNum++
-			log.Printf("[coordinator] map task %v done!", args.SeqNum)
+			log.Printf("[coordinator] map task %v done!", args.Id)
 		} else {
 			c.reduceDoneNum++
-			log.Printf("[coordinator] reduce task %v done!", args.SeqNum)
+			log.Printf("[coordinator] reduce task %v done!", args.Id)
 		}
-		delete(c.runningSet, id)
+		delete(c.runningSet, args.Id)
 	}
 
 	return nil
@@ -195,18 +184,18 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
-	c.MapQueue = make(chan *Task, nReduce)
+	c.MapQueue = make(chan *Task, len(files))
 	c.ReduceQueue = make(chan *Task, nReduce)
 	c.runningSet = make(map[int]*Task, nReduce)
 	c.nReduce = nReduce
 	c.nMap = len(files)
-	c.phase = "map"
 
 	for i, file := range files {
 		t := Task{}
 		t.Filename = file
 		t.MapOrReduce = true
 		t.SeqNum = i
+		t.Id = i
 		// push to channel
 		c.MapQueue <- &t
 		log.Printf("Map Task[%s] pushed to the map queue\n", t.Filename)
@@ -215,6 +204,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for i := 0; i < nReduce; i++ {
 		t := Task{}
 		t.SeqNum = i
+		t.Id = i + c.nMap
 		t.MapOrReduce = false
 		c.ReduceQueue <- &t
 		log.Printf("Reduce Task[%d] pushed to the map queue\n", t.SeqNum)

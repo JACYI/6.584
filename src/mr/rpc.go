@@ -16,14 +16,9 @@ const (
 	FINISHED
 )
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
 type ExampleArgs struct {
-	SeqNum      int
 	MapOrReduce bool
+	Id          int
 }
 
 type ExampleReply struct {

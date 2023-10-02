@@ -99,7 +99,7 @@ func CallForTask(args *ExampleArgs, reply *ExampleReply) {
 
 func completeTask(reply *ExampleReply) {
 	args := ExampleArgs{}
-	args.SeqNum = reply.Task.SeqNum
+	args.Id = reply.Task.Id
 	args.MapOrReduce = reply.Task.MapOrReduce
 	m := ExampleReply{}
 
