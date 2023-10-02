@@ -17,6 +17,8 @@ const (
 	TASK_DONE
 )
 
+const TimeOut = 10 * time.Second
+
 type CStatus int
 
 type Task struct {
@@ -33,7 +35,7 @@ type Coordinator struct {
 	lock        sync.Mutex
 	MapQueue    chan *Task
 	ReduceQueue chan *Task
-	runningSet  map[int]bool
+	runningSet  map[int]*Task
 
 	mapDoneNum    int
 	reduceDoneNum int
@@ -61,6 +63,30 @@ func checkForStatus(c *Coordinator) CStatus {
 	return MAP_PHASE
 }
 
+func runWatchDog(c *Coordinator, task *Task) {
+	time.Sleep(TimeOut)
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	id := task.SeqNum
+	if !task.MapOrReduce {
+		id += c.nMap
+	}
+
+	if task, ok := c.runningSet[id]; ok && time.Now().Sub(task.BeginTime) > TimeOut {
+		// cancel the timeout task and reput it into the task queue
+		delete(c.runningSet, id)
+		log.Printf("[task-watch-dog] task %v timeout\n", task.SeqNum)
+		if task.MapOrReduce {
+			log.Printf("[task-watch-dog] task %v reput into map queue\n", task.SeqNum)
+			c.MapQueue <- task
+		} else {
+			log.Printf("[task-watch-dog] task %v reput into reduce queue\n", task.SeqNum)
+			c.ReduceQueue <- task
+		}
+	}
+}
+
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RequestTask(args *ExampleArgs, reply *ExampleReply) error {
 	var task *Task
@@ -74,35 +100,39 @@ func (c *Coordinator) RequestTask(args *ExampleArgs, reply *ExampleReply) error 
 	switch curStatus {
 	case PENDING_RUNNING:
 		reply.Status = PENDING
-		log.Printf("pending\n")
 		return nil
 
 	case TASK_DONE:
 		reply.Status = FINISHED
-		log.Printf("all were finished\n")
 		return nil
 
 	case MAP_PHASE:
-		log.Printf("map queue size: %v", len(c.MapQueue))
 		task = <-c.MapQueue
+		log.Printf("[coordinator] map task %v starts\n", task.SeqNum)
 		break
 	case REDUCE_PHASE:
-		log.Printf("reduce queue size: %v", len(c.ReduceQueue))
 		task = <-c.ReduceQueue
+		log.Printf("[coordinator] reduce task %v starts\n", task.SeqNum)
 		break
 	}
 
-	log.Printf("task file: %v\n", task.Filename)
-	if c.runningSet[task.SeqNum] {
-		log.Panic("Task was running")
+	/* watch dog use id to diff map and reduce phase */
+	id := task.SeqNum
+	if curStatus == REDUCE_PHASE {
+		id += c.nMap
 	}
-	c.runningSet[task.SeqNum] = true
-	task.BeginTime = time.Time{}
+	if _, ok := c.runningSet[id]; ok {
+		log.Panic("[coordinator] Task was running")
+	}
+	c.runningSet[id] = task
+	task.BeginTime = time.Now()
 	reply.Task = task
 	reply.Status = RUNNING
 	reply.Task.MapOrReduce = curStatus == MAP_PHASE
 	reply.NReduce = c.nReduce
 	reply.NMap = c.nMap
+	/* async goroutine start watch dogs */
+	go runWatchDog(c, task)
 
 	return nil
 }
@@ -111,15 +141,20 @@ func (c *Coordinator) CompleteTask(args *ExampleArgs, reply *ExampleReply) error
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	if c.runningSet[args.SeqNum] {
+	id := args.SeqNum
+	if !args.MapOrReduce {
+		id += c.nMap
+	}
+
+	if _, ok := c.runningSet[id]; ok {
 		if args.MapOrReduce {
 			c.mapDoneNum++
-			log.Printf("map task %v done!", args.SeqNum)
+			log.Printf("[coordinator] map task %v done!", args.SeqNum)
 		} else {
 			c.reduceDoneNum++
-			log.Printf("reduce task %v done!", args.SeqNum)
+			log.Printf("[coordinator] reduce task %v done!", args.SeqNum)
 		}
-		delete(c.runningSet, args.SeqNum)
+		delete(c.runningSet, id)
 	}
 
 	return nil
@@ -162,7 +197,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.MapQueue = make(chan *Task, nReduce)
 	c.ReduceQueue = make(chan *Task, nReduce)
-	c.runningSet = make(map[int]bool, nReduce)
+	c.runningSet = make(map[int]*Task, nReduce)
 	c.nReduce = nReduce
 	c.nMap = len(files)
 	c.phase = "map"

@@ -49,13 +49,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			case RUNNING:
 				goto runTask
 			case FINISHED:
-				log.Println("work exit")
+				log.Println("[worker] worker exit")
 				os.Exit(0)
 			case PENDING:
+				log.Println("[worker] pending...")
 				time.Sleep(1 * time.Second)
 				break
 			case FAILED:
-				log.Println("job failed")
+				log.Println("[worker] job failed")
 			}
 		}
 
@@ -79,36 +80,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 		}
 		// call RPC for done
-		completeTask(reply.Task.SeqNum, reply.Task.MapOrReduce)
+		completeTask(&reply)
 
-	}
-}
-
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	//args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y \n")
-	} else {
-		fmt.Printf("call failed!\n")
 	}
 }
 
@@ -124,13 +97,13 @@ func CallForTask(args *ExampleArgs, reply *ExampleReply) {
 
 }
 
-func completeTask(seqNum int, mapOrReduce bool) {
+func completeTask(reply *ExampleReply) {
 	args := ExampleArgs{}
-	args.SeqNum = seqNum
-	args.MapOrReduce = mapOrReduce
-	reply := ExampleReply{}
+	args.SeqNum = reply.Task.SeqNum
+	args.MapOrReduce = reply.Task.MapOrReduce
+	m := ExampleReply{}
 
-	ok := call("Coordinator.CompleteTask", &args, &reply)
+	ok := call("Coordinator.CompleteTask", &args, &m)
 	if !ok {
 		log.Fatalf("rpc failed: %v\n", ok)
 	}
