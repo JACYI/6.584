@@ -5,8 +5,9 @@ import "log"
 // Debugging
 const Debug = false
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func DPrintf(format string, a ...interface{}) {
 	if Debug {
+		log.SetPrefix("[DEBUG]")
 		log.Printf(format, a...)
 	}
 	return
