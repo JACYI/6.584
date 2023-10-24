@@ -87,7 +87,7 @@ type Raft struct {
 	HeartBeatsTicker  *time.Ticker
 	RequestVoteTicker *time.Ticker
 
-	//Log []LogEntry // Log Entry
+	Logs []LogEntry // Log Entry
 }
 
 // return currentTerm and whether this server
@@ -272,15 +272,21 @@ type AppendEntriesArgs struct {
 	Term        int
 	LeaderId    int
 	IsHeartBeat bool
+
+	prevLogIndex int        // index of current latest log entry
+	prevLogTerm  int        // term of prevLogIndex entry
+	entries      []LogEntry // empty if is heartbeat
+	leaderCommit int        // leader commit index
 }
 type AppendEntriesReply struct {
-	Ok bool
+	Success bool
+	Term    int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	reply.Ok = true
+	reply.Success = true
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		if rf.state == Leader {
@@ -297,7 +303,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	} else {
 		// expired heartbeats
-		reply.Ok = false
+		reply.Success = false
 	}
 
 }
@@ -311,7 +317,7 @@ func (rf *Raft) sendAppendEntries(server int, resp *atomic.Int32, args *AppendEn
 		return fmt.Errorf("failed to send append entries request from server[%v] to server[%v]\n", rf.me, server)
 	}
 
-	//if reply.Ok {
+	//if reply.Success {
 	//	resp.Add(1)
 	//}
 	// TODO: supply the handle process of reply
@@ -410,7 +416,7 @@ type rpcCallRes struct {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := rf.state == Leader
 
 	// Your code here (2B).
 
@@ -468,17 +474,21 @@ func (rf *Raft) ticker() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		mu:                sync.Mutex{},
-		peers:             peers,
-		persister:         persister,
-		me:                me,
-		dead:              0,
-		state:             Follower,
-		CurrentTerm:       0,
-		VoteFor:           -1,
-		Voted:             false,
+		mu:        sync.Mutex{},
+		peers:     peers,
+		persister: persister,
+		me:        me,
+		dead:      0,
+
+		state:       Follower,
+		CurrentTerm: 0,
+		VoteFor:     -1,
+		Voted:       false,
+
 		HeartBeatsTicker:  time.NewTicker(time.Duration(HeartBeatsGap) * time.Millisecond),
 		RequestVoteTicker: time.NewTicker(time.Duration(ExpiredTime) * time.Millisecond),
+
+		Logs: make([]LogEntry, 0),
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
